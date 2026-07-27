@@ -33,9 +33,6 @@ permissions:
   contents: read
   packages: write
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE20: true
-
 jobs:
   build-and-publish:
     # NOTE: upstream's own CI uses macos-latest-large, but that "larger
@@ -98,9 +95,11 @@ jobs:
 
       - name: Determine version string
         id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [ -n "${{ inputs.version }}" ]; then
-            echo "value=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          if [ -n "$INPUT_VERSION" ]; then
+            echo "value=$INPUT_VERSION" >> "$GITHUB_OUTPUT"
           else
             # android/version.txt does not exist anywhere in this codebase
             # (upstream doesn't generate one) - it always silently fell
