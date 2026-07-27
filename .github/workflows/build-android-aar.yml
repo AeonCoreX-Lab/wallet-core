@@ -1,0 +1,124 @@
+name: Build & Publish Android AAR
+
+# Builds the aeoncorex-custom branch and publishes the resulting AAR to
+# this repo's GitHub Packages Maven registry, so AeonVault's app/build.gradle.kts
+# can pull it as a normal dependency instead of vendoring source.
+on:
+  push:
+    branches:
+      - aeoncorex-custom
+    paths:
+      # Only rebuild when something that actually affects the Android
+      # artifact changed - avoids burning CI minutes on doc-only or
+      # iOS/WASM-only upstream changes that happened to ride along in a
+      # sync merge.
+      - 'android/**'
+      - 'src/**'
+      - 'rust/**'
+      - 'include/**'
+      - 'CMakeLists.txt'
+      - 'registry.json'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g. 4.6.0-aeoncorex.1)'
+        required: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build-and-publish:
+    # NOTE: upstream's own CI uses macos-latest-large, but that "larger
+    # runner" tier is NOT available on the GitHub Free plan (public repos
+    # get unlimited free minutes, but only on standard runners; larger
+    # runners require GitHub Team/Enterprise). macos-latest works
+    # identically here, just slower - Wallet Core's CMake/Protobuf/Rust
+    # build simply takes longer on the smaller machine. If minutes or
+    # build time ever become a real constraint, revisit self-hosted
+    # runners (free on any plan) rather than upgrading the GitHub plan.
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout aeoncorex-custom
+        uses: actions/checkout@v4
+        with:
+          ref: aeoncorex-custom
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.10.2
+
+      - name: Install system dependencies (mirrors upstream's own CI step)
+        run: tools/install-sys-dependencies-mac
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            rust
+
+      - name: Install Rust dependencies
+        run: tools/install-rust-dependencies
+
+      - name: Install Android dependencies
+        run: tools/install-android-dependencies
+
+      - name: Cache internal dependencies (Protobuf, Boost, etc.)
+        id: internal_cache
+        uses: actions/cache@v4
+        with:
+          path: build/local
+          key: ${{ runner.os }}-${{ runner.arch }}-internal-${{ hashFiles('tools/install-dependencies') }}-${{ hashFiles('tools/dependencies-version') }}
+
+      - name: Install internal dependencies
+        if: steps.internal_cache.outputs.cache-hit != 'true'
+        run: tools/install-dependencies
+
+      - name: Generate protobuf / codegen files
+        run: tools/generate-files android
+
+      - name: Determine version string
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "value=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            UPSTREAM_VERSION=$(cat android/version.txt 2>/dev/null || echo "0.0.0")
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            echo "value=${UPSTREAM_VERSION}-aeoncorex.${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build release AAR
+        run: |
+          cd android
+          ./gradlew clean assembleRelease -Pversion="${{ steps.version.outputs.value }}"
+
+      - name: Publish to this repo's GitHub Packages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+        run: |
+          cd android
+          ./gradlew publishAllPublicationsToGitHubPackagesRepository -Pversion="${{ steps.version.outputs.value }}"
+
+      - name: Upload AAR as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wallet-core-aar-${{ steps.version.outputs.value }}
+          path: android/wallet-core/build/outputs/aar/*.aar
+
+      - name: Summary
+        run: |
+          echo "### Published wallet-core AAR" >> "$GITHUB_STEP_SUMMARY"
+          echo "Version: \`${{ steps.version.outputs.value }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "AeonVault's app/build.gradle.kts should pin to this exact version explicitly." >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,135 @@
+name: Sync Upstream (Trust Wallet Core)
+
+# Runs weekly on a schedule AND supports manual trigger (workflow_dispatch)
+# for whenever you want to pull upstream changes on demand — e.g. right
+# after Trust Wallet publishes a security fix.
+on:
+  schedule:
+    # Every Monday at 03:00 UTC. Chosen off-peak, and early in the week so
+    # a conflict PR (if any) has the whole week to get reviewed before the
+    # next sync attempt piles on top of it.
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: 'Which branch to sync into aeoncorex-custom (usually "main")'
+        required: false
+        default: 'main'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync-main-with-upstream:
+    name: 1. Sync main <- upstream/master
+    runs-on: ubuntu-latest
+    outputs:
+      main_updated: ${{ steps.diff_check.outputs.changed }}
+    steps:
+      - name: Checkout fork (full history needed for merge)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/trustwallet/wallet-core.git
+          git fetch upstream master
+
+      - name: Check if there's anything new to merge
+        id: diff_check
+        run: |
+          BEHIND_COUNT=$(git rev-list --count HEAD..upstream/master)
+          echo "commits behind upstream: $BEHIND_COUNT"
+          if [ "$BEHIND_COUNT" -gt 0 ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # main is a pure mirror of upstream/master - fast-forward only.
+      # If this ever fails (main has diverged, e.g. someone accidentally
+      # committed directly to it), that's a signal to fix main by hand
+      # rather than let this workflow force-push over history.
+      - name: Fast-forward main to upstream/master
+        if: steps.diff_check.outputs.changed == 'true'
+        run: |
+          git merge --ff-only upstream/master
+          git push origin main
+
+  merge-into-custom-branch:
+    name: 2. Merge main -> aeoncorex-custom
+    needs: sync-main-with-upstream
+    if: needs.sync-main-with-upstream.outputs.main_updated == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout aeoncorex-custom
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: aeoncorex-custom
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity for the merge commit
+        run: |
+          git config user.name "aeoncorex-sync-bot"
+          git config user.email "sync-bot@aeoncorex.dev"
+
+      - name: Attempt merge from main
+        id: merge_attempt
+        run: |
+          git fetch origin main
+          if git merge origin/main --no-edit -m "sync: merge upstream changes from main"; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            git merge --abort
+          fi
+
+      # Clean merge (no conflicts with our customizations): push directly
+      # to aeoncorex-custom. This is safe to automate because a clean merge
+      # by definition touched no line our custom code also touches.
+      - name: Push clean merge directly
+        if: steps.merge_attempt.outputs.clean == 'true'
+        run: git push origin aeoncorex-custom
+
+      # Conflicting merge: NEVER auto-resolve. Push to a dedicated branch
+      # and open a PR for human review instead - see the top-level rationale
+      # in AeonVault's README: silent auto-merge conflict resolution in
+      # wallet signing/key-derivation code is exactly the kind of thing
+      # that must never happen without a person looking at it.
+      - name: Create conflict-resolution branch and PR
+        if: steps.merge_attempt.outputs.clean == 'false'
+        run: |
+          BRANCH="sync/upstream-conflict-$(date +%Y%m%d)"
+          git fetch origin main
+          git checkout -b "$BRANCH"
+          git merge origin/main --no-edit -m "sync: merge upstream changes from main (has conflicts)" || true
+          git push origin "$BRANCH"
+          gh pr create \
+            --base aeoncorex-custom \
+            --head "$BRANCH" \
+            --title "⚠️ Upstream sync has conflicts - manual review needed" \
+            --body "Automated sync from \`main\` into \`aeoncorex-custom\` hit a merge conflict.
+
+          This almost always means upstream changed a file AeonVault has also customized.
+
+          **Do not merge this PR until every conflict marker is resolved by hand and the wallet
+          test suite passes.** Conflicts in signing/key-derivation/address code are exactly the
+          class of bug that must never be auto-resolved.
+
+          Run \`git diff main..aeoncorex-custom -- <conflicted files>\` locally to see what our
+          customization changed, then reconcile against the new upstream version."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify_no_changes:
+    name: Report no changes needed
+    needs: sync-main-with-upstream
+    if: needs.sync-main-with-upstream.outputs.main_updated == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "main is already up to date with upstream/master - nothing to sync."
