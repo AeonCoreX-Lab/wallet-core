@@ -43,7 +43,7 @@ jobs:
     # build simply takes longer on the smaller machine. If minutes or
     # build time ever become a real constraint, revisit self-hosted
     # runners (free on any plan) rather than upgrading the GitHub plan.
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
 
     steps:
       - name: Checkout aeoncorex-custom
