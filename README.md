@@ -21,6 +21,73 @@ Swift for iOS and Java (Kotlin) for Android.
 ![SPM](https://img.shields.io/badge/SPM-ready-blue)
 ![Cocoapods](https://img.shields.io/cocoapods/v/TrustWalletCore.svg)
 
+# AeonCoreX-Lab Fork
+
+## Purpose
+
+This repository is a fork of [trustwallet/wallet-core](https://github.com/trustwallet/wallet-core), maintained by [AeonCoreX-Lab](https://github.com/AeonCoreX-Lab) as the wallet-core dependency for [AeonVault](https://github.com/AeonCoreX-Lab/AeonVault).
+
+Vendoring upstream source directly into AeonVault would mean manually re-applying any customizations on every upstream update, with no clean way to tell "our changes" apart from "upstream changes." Forking instead gives AeonVault:
+
+- A stable, versioned Android artifact (AAR) to depend on like any other Maven library, instead of building wallet-core from source inside the app's own build.
+- A place to carry AeonVault-specific customizations on top of upstream, isolated on their own branch, without losing the ability to pull in upstream fixes (in particular security patches) on an ongoing basis.
+- An explicit, human-reviewed gate on every upstream sync — nothing merges into the branch AeonVault actually builds from without a clean fast-forward or a reviewed PR.
+
+## What this fork does
+
+1. **Mirrors upstream** — `main` tracks `trustwallet/wallet-core:master` exactly, kept in sync automatically.
+2. **Layers AeonVault's customizations on top** — `aeoncorex-custom` is `main` plus AeonVault-specific changes, and is the branch everything is actually built from.
+3. **Builds and publishes a versioned Android AAR** — on a relevant change (or manual trigger), CI builds `aeoncorex-custom` and publishes the release AAR to this repo's own GitHub Packages Maven registry under an explicit version string.
+4. **Keeps upstream syncs safe** — a clean merge from `main` is pushed automatically; anything that conflicts with AeonVault's customizations (most likely in signing/key-derivation/address code) stops and opens a PR instead of being auto-resolved.
+
+**Branch layout**
+
+| Branch | Purpose |
+| --- | --- |
+| `main` | Pure mirror of upstream `trustwallet/wallet-core:master`. Fast-forward only — no direct commits. |
+| `aeoncorex-custom` | AeonVault's customizations, merged on top of `main`. All app-facing builds are published from here. |
+
+**Automation**
+
+- [`sync-upstream.yml`](.github/workflows/sync-upstream.yml) — runs weekly (Mondays 03:00 UTC) and on manual dispatch. Fast-forwards `main` from upstream, then merges `main` into `aeoncorex-custom`. Clean merges are pushed automatically; conflicts open a PR against `aeoncorex-custom` for manual review instead of being auto-resolved.
+- [`build-android-aar.yml`](.github/workflows/build-android-aar.yml) — builds `aeoncorex-custom` on relevant changes (or manual dispatch with an explicit version) and publishes the release AAR to this repo's GitHub Packages Maven registry.
+
+## Required secrets / tokens
+
+| Name | Used by | Where it comes from |
+| --- | --- | --- |
+| `GITHUB_TOKEN` | Both workflows (sync + publish) | Auto-provided by GitHub Actions for every run — nothing to create. Its *permissions* still need `packages: write` (see below), granted either by the workflow's own `permissions:` block or, if that's not enough, by Settings → Actions → General → Workflow permissions → "Read and write permissions". |
+| `GPR_USER` / `GPR_TOKEN` | AeonVault (consumer side, not this repo) | A **Personal Access Token** — Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token, scope `read:packages`. `GITHUB_TOKEN` only works within its own repo's run; reading a package from a different repo always needs a real PAT, even within the same org. Store locally in `~/.gradle/gradle.properties` (never commit it) or as a repo secret under AeonVault's Settings → Secrets and variables → Actions. |
+
+No other secrets are required to publish from this repo — `sync-upstream.yml` and `build-android-aar.yml` both run entirely on the default `GITHUB_TOKEN`.
+
+## Using the published AAR
+
+AeonVault (or any other consumer) pulls this as a normal Gradle dependency instead of vendoring source:
+
+```kotlin
+// settings.gradle.kts
+dependencyResolutionManagement {
+    repositories {
+        maven {
+            name = "AeonCoreXWalletCore"
+            url = uri("https://maven.pkg.github.com/AeonCoreX-Lab/wallet-core")
+            credentials {
+                username = System.getenv("GPR_USER")
+                password = System.getenv("GPR_TOKEN")
+            }
+        }
+    }
+}
+```
+
+```kotlin
+// app/build.gradle.kts
+implementation("com.trustwallet:wallet-core:<published-version>")
+```
+
+Always pin to the exact version string printed in the `build-android-aar.yml` run summary — floating versions are intentionally not supported, since silent upgrades to signing/key-derivation code are not acceptable here.
+
 # Documentation
 
 For comprehensive documentation, see [developer.trustwallet.com](https://developer.trustwallet.com/wallet-core).

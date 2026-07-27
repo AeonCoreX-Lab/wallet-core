@@ -24,6 +24,15 @@ on:
         description: 'Version to publish (e.g. 4.6.0-aeoncorex.1)'
         required: true
 
+# Explicit, least-privilege GITHUB_TOKEN scope for this workflow. Without
+# this, the token's actual rights fall back to the repo-level default under
+# Settings -> Actions -> General -> Workflow permissions, which is
+# read-only on most repos (including forks) - that silently 403s the
+# GitHub Packages publish step below.
+permissions:
+  contents: read
+  packages: write
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -45,6 +54,7 @@ jobs:
         with:
           ref: aeoncorex-custom
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -55,7 +65,7 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 8.10.2
+          gradle-version: 9.6.1
 
       - name: Install system dependencies (mirrors upstream's own CI step)
         run: tools/install-sys-dependencies-mac
@@ -92,7 +102,12 @@ jobs:
           if [ -n "${{ inputs.version }}" ]; then
             echo "value=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
           else
-            UPSTREAM_VERSION=$(cat android/version.txt 2>/dev/null || echo "0.0.0")
+            # android/version.txt does not exist anywhere in this codebase
+            # (upstream doesn't generate one) - it always silently fell
+            # back to "0.0.0" here before. Use the same source upstream's
+            # own tools/wasm-set-version script uses: the nearest release
+            # tag reachable from HEAD.
+            UPSTREAM_VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
             SHORT_SHA=$(git rev-parse --short HEAD)
             echo "value=${UPSTREAM_VERSION}-aeoncorex.${SHORT_SHA}" >> "$GITHUB_OUTPUT"
           fi

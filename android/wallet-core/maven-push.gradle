@@ -12,9 +12,14 @@ publishing {
     repositories {
         maven {
             name = "GitHubPackages"
-            url = uri("https://maven.pkg.github.com/trustwallet/wallet-core")
+            // Publishes to AeonCoreX-Lab's own fork registry, NOT upstream
+            // trustwallet/wallet-core — the fork's GITHUB_TOKEN has no
+            // publish rights on the upstream repo anyway.
+            url = uri("https://maven.pkg.github.com/AeonCoreX-Lab/wallet-core")
             credentials {
-                username = System.getenv("GITHUB_USER")
+                // build-android-aar.yml sets GITHUB_ACTOR (not GITHUB_USER)
+                // alongside GITHUB_TOKEN — must match exactly or auth is null.
+                username = System.getenv("GITHUB_ACTOR")
                 password = System.getenv("GITHUB_TOKEN")
             }
         }

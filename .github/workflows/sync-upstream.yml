@@ -1,8 +1,40 @@
 name: Sync Upstream (Trust Wallet Core)
 
-# Runs weekly on a schedule AND supports manual trigger (workflow_dispatch)
-# for whenever you want to pull upstream changes on demand — e.g. right
-# after Trust Wallet publishes a security fix.
+# ═══════════════════════════════════════════════════════════════════
+#  Runs weekly on a schedule AND supports manual trigger
+#  (workflow_dispatch) for whenever you want to pull upstream changes
+#  on demand — e.g. right after Trust Wallet publishes a security fix.
+#
+#  Sync main <- upstream/master (fast-forward only), then merge
+#  main -> aeoncorex-custom. Clean merges push straight to
+#  aeoncorex-custom; conflicts open a PR instead of being auto-resolved
+#  — see the rationale comment on the conflict-PR step below.
+#
+#  IMPORTANT — why this uses a GitHub App token instead of the default
+#  GITHUB_TOKEN or a PAT:
+#  GitHub deliberately does NOT fire other workflows' `on: push`
+#  triggers for pushes made with the default GITHUB_TOKEN
+#  (loop-prevention). A push authenticated with the default token would
+#  land on aeoncorex-custom, but build-android-aar.yml's `on: push`
+#  would never fire — the merge would just sit there unpublished until
+#  something else touched android/**, src/**, etc. directly.
+#
+#  A classic/fine-grained PAT would also work, but expires (max 1yr for
+#  fine-grained) and is tied to a personal account. A GitHub App
+#  installation token has no expiry at the App level (the short-lived
+#  ~1hr token is regenerated fresh on every run via
+#  actions/create-github-app-token) and is scoped to the org + this
+#  repo specifically, independent of any one person's account. Same
+#  streamx-sync-rider App already used in sync-providers.yml elsewhere.
+#  See: https://docs.github.com/en/actions/using-workflows/triggering-a-workflow#triggering-a-workflow-from-a-workflow
+#
+#  Required secrets (Settings → Secrets and variables → Actions):
+#    SYNC_BOT_APP_ID       — the GitHub App's numeric App ID
+#    SYNC_BOT_PRIVATE_KEY  — the App's private key (.pem contents, in full)
+#  (App must be installed on this repo with Contents: Read & write,
+#  Pull requests: Read & write.)
+# ═══════════════════════════════════════════════════════════════════
+
 on:
   schedule:
     # Every Monday at 03:00 UTC. Chosen off-peak, and early in the week so
@@ -27,12 +59,22 @@ jobs:
     outputs:
       main_updated: ${{ steps.diff_check.outputs.changed }}
     steps:
+      - name: Generate GitHub App token
+        id: app_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.SYNC_BOT_APP_ID }}
+          private-key: ${{ secrets.SYNC_BOT_PRIVATE_KEY }}
+
       - name: Checkout fork (full history needed for merge)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: main
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # App installation token, not the default GITHUB_TOKEN — see
+          # header comment above. Without this, the push lands but
+          # build-android-aar.yml's `on: push` never fires.
+          token: ${{ steps.app_token.outputs.token }}
 
       - name: Add upstream remote
         run: |
@@ -66,17 +108,34 @@ jobs:
     if: needs.sync-main-with-upstream.outputs.main_updated == 'true'
     runs-on: ubuntu-latest
     steps:
+      - name: Generate GitHub App token
+        id: app_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.SYNC_BOT_APP_ID }}
+          private-key: ${{ secrets.SYNC_BOT_PRIVATE_KEY }}
+
+      - name: Get App bot identity
+        id: app_identity
+        run: |
+          echo "user-id=$(gh api "/users/${{ steps.app_token.outputs.app-slug }}[bot]" --jq .id)" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+
       - name: Checkout aeoncorex-custom
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: aeoncorex-custom
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # App installation token, not the default GITHUB_TOKEN — see
+          # header comment above. Without this, the push lands but
+          # build-android-aar.yml's `on: push` never fires.
+          token: ${{ steps.app_token.outputs.token }}
 
       - name: Configure git identity for the merge commit
         run: |
-          git config user.name "aeoncorex-sync-bot"
-          git config user.email "sync-bot@aeoncorex.dev"
+          git config user.name "${{ steps.app_token.outputs.app-slug }}[bot]"
+          git config user.email "${{ steps.app_identity.outputs.user-id }}+${{ steps.app_token.outputs.app-slug }}[bot]@users.noreply.github.com"
 
       - name: Attempt merge from main
         id: merge_attempt
@@ -92,6 +151,9 @@ jobs:
       # Clean merge (no conflicts with our customizations): push directly
       # to aeoncorex-custom. This is safe to automate because a clean merge
       # by definition touched no line our custom code also touches.
+      # Pushes using the App installation token from checkout above (not
+      # GITHUB_TOKEN) — this is what lets build-android-aar.yml's
+      # `on: push` trigger fire for this commit.
       - name: Push clean merge directly
         if: steps.merge_attempt.outputs.clean == 'true'
         run: git push origin aeoncorex-custom
@@ -124,7 +186,7 @@ jobs:
           Run \`git diff main..aeoncorex-custom -- <conflicted files>\` locally to see what our
           customization changed, then reconcile against the new upstream version."
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
 
   notify_no_changes:
     name: Report no changes needed
