@@ -111,6 +111,20 @@ jobs:
             echo "value=${UPSTREAM_VERSION}-aeoncorex.${SHORT_SHA}" >> "$GITHUB_OUTPUT"
           fi
 
+      # ROOT CAUSE of the "Could NOT find Boost" CMake failure seen in
+      # earlier runs: upstream's own build scripts (tools/android-build,
+      # tools/android-release, tools/kotlin-build - see `grep BOOST_ROOT
+      # tools/*`) all export this before invoking Gradle. Boost itself is
+      # installed system-wide via Homebrew in "Install system dependencies"
+      # above (tools/install-sys-dependencies-mac runs `brew install
+      # boost`) - it is NOT one of the things tools/install-dependencies
+      # builds into build/local (that step only builds
+      # gtest/gmock/libcheck/protobuf/nlohmann_json). Skipping this export
+      # is exactly why CMake's find_host_package(Boost) came back empty
+      # even though every earlier step looked successful.
+      - name: Export BOOST_ROOT (matches tools/android-release)
+        run: echo "BOOST_ROOT=$(brew --prefix boost)" >> "$GITHUB_ENV"
+
       - name: Build release AAR
         run: |
           cd android
